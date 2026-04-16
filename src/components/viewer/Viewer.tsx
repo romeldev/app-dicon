@@ -390,20 +390,16 @@ export function Viewer() {
   const handleFlipH = () => {
     const viewport = getViewport()
     if (!viewport) return
-    const presentation = viewport.getViewPresentation()
-    viewport.setViewPresentation({
-      flipHorizontal: !presentation.flipHorizontal,
-    })
+    const camera = viewport.getCamera()
+    viewport.setCamera({ flipHorizontal: !camera.flipHorizontal })
     viewport.render()
   }
 
   const handleFlipV = () => {
     const viewport = getViewport()
     if (!viewport) return
-    const presentation = viewport.getViewPresentation()
-    viewport.setViewPresentation({
-      flipVertical: !presentation.flipVertical,
-    })
+    const camera = viewport.getCamera()
+    viewport.setCamera({ flipVertical: !camera.flipVertical })
     viewport.render()
   }
 
