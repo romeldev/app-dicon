@@ -4,6 +4,7 @@ import * as React from "react"
 import {
   Enums,
   RenderingEngine,
+  eventTarget,
   getRenderingEngine,
   metaData,
   utilities as coreUtilities,
@@ -13,6 +14,7 @@ import {
   ToolGroupManager,
   Enums as ToolEnums,
   annotation as csAnnotation,
+  cancelActiveManipulations,
   utilities as toolUtilities,
 } from "@cornerstonejs/tools"
 
@@ -22,7 +24,10 @@ import {
   registerWebImageSource,
   unregisterWebImageSource,
 } from "@/lib/cornerstone/webImageLoader"
-import { downloadCanvasAsPng, suggestFilename } from "@/lib/viewer/export"
+import {
+  exportViewportWithAnnotations,
+  suggestFilename,
+} from "@/lib/viewer/export"
 import { hashFile } from "@/lib/viewer/hash"
 import {
   clearImageState,
@@ -67,11 +72,14 @@ export function Viewer() {
   const [pending, setPending] =
     React.useState<PendingCalibration | null>(null)
   const [recentImages, setRecentImages] = React.useState<StoredImageMeta[]>([])
+  const [annotationsHidden, setAnnotationsHidden] = React.useState(false)
 
   const activeToolRef = React.useRef(activeTool)
   const calibrateModeRef = React.useRef(calibrateMode)
   const imageIdRef = React.useRef<string | null>(null)
   const blobUrlRef = React.useRef<string | null>(null)
+  const cancelledUIDsRef = React.useRef<Set<string>>(new Set())
+  const isCancellingRef = React.useRef(false)
 
   React.useEffect(() => {
     activeToolRef.current = activeTool
@@ -113,6 +121,12 @@ export function Viewer() {
         toolGroup.addTool(TOOL_NAMES.WindowLevel)
       if (!toolGroup.hasTool(TOOL_NAMES.Length))
         toolGroup.addTool(TOOL_NAMES.Length)
+      if (!toolGroup.hasTool(TOOL_NAMES.Angle))
+        toolGroup.addTool(TOOL_NAMES.Angle)
+      if (!toolGroup.hasTool(TOOL_NAMES.Ellipse))
+        toolGroup.addTool(TOOL_NAMES.Ellipse)
+      if (!toolGroup.hasTool(TOOL_NAMES.Eraser))
+        toolGroup.addTool(TOOL_NAMES.Eraser)
       if (!toolGroup.hasTool(TOOL_NAMES.StackScroll))
         toolGroup.addTool(TOOL_NAMES.StackScroll)
 
@@ -129,6 +143,9 @@ export function Viewer() {
         bindings: [{ mouseButton: ToolEnums.MouseBindings.Primary }],
       })
       toolGroup.setToolPassive(TOOL_NAMES.Length)
+      toolGroup.setToolPassive(TOOL_NAMES.Angle)
+      toolGroup.setToolPassive(TOOL_NAMES.Ellipse)
+      toolGroup.setToolPassive(TOOL_NAMES.Eraser)
 
       setReady(true)
       setRecentImages(listImages())
@@ -175,9 +192,9 @@ export function Viewer() {
   }, [])
 
   // Listen for annotation completion events (for calibration capture).
+  // Cornerstone dispatches ANNOTATION_* events on the global eventTarget, not on the DOM element.
   React.useEffect(() => {
-    const element = containerRef.current
-    if (!element) return
+    if (!ready) return
     const handler = (evt: Event) => {
       const custom = evt as CustomEvent<{
         annotation?: {
@@ -190,37 +207,150 @@ export function Viewer() {
       const ann = detail?.annotation
       if (!ann) return
       if (ann.metadata?.toolName !== TOOL_NAMES.Length) return
+      // Skip if this completion comes from an explicit cancel (LengthTool.cancel()
+      // fires ANNOTATION_COMPLETED synchronously even when the user aborted).
+      if (isCancellingRef.current || cancelledUIDsRef.current.has(ann.annotationUID)) {
+        cancelledUIDsRef.current.delete(ann.annotationUID)
+        try {
+          csAnnotation.state.removeAnnotation(ann.annotationUID)
+        } catch {}
+        return
+      }
       if (!calibrateModeRef.current) return
       const pts = ann.data?.handles?.points
       if (!pts || pts.length < 2) return
-      const engine = engineRef.current
-      if (!engine) return
-      const viewport = engine.getViewport(VIEWPORT_ID) as CoreTypes.IStackViewport
-      const a = viewport.worldToCanvas(pts[0] as CoreTypes.Point3)
-      const b = viewport.worldToCanvas(pts[1] as CoreTypes.Point3)
-      const zoom = viewport.getZoom()
-      const dxCanvas = b[0] - a[0]
-      const dyCanvas = b[1] - a[1]
-      const pixelLength =
-        Math.sqrt(dxCanvas * dxCanvas + dyCanvas * dyCanvas) / zoom
+      // Our web loader sets rowPixelSpacing = columnPixelSpacing = 1, so world
+      // distance equals image-index distance (in pixels). Using world space
+      // matches exactly what Cornerstone uses internally to compute lengths.
+      const [ax, ay, az = 0] = pts[0]
+      const [bx, by, bz = 0] = pts[1]
+      const pixelLength = Math.hypot(bx - ax, by - ay, bz - az)
       setPending({ annotationUID: ann.annotationUID, pixelLength })
     }
-    element.addEventListener(
+    eventTarget.addEventListener(
       ToolEnums.Events.ANNOTATION_COMPLETED,
       handler as EventListener,
     )
     return () => {
-      element.removeEventListener(
+      eventTarget.removeEventListener(
         ToolEnums.Events.ANNOTATION_COMPLETED,
         handler as EventListener,
       )
     }
   }, [ready])
 
-  // Persist annotations on modify / add.
+  // Eraser hover: highlight the annotation under the cursor in red so the user
+  // sees which one will be removed on click.
   React.useEffect(() => {
+    if (!ready) return
+    if (activeTool !== "eraser" || calibrateMode) return
     const element = containerRef.current
     if (!element) return
+
+    const styleCfg = csAnnotation.config.style as {
+      setAnnotationStyles: (
+        uid: string,
+        styles: Record<string, string>,
+      ) => void
+    }
+    const RED = "rgb(239, 68, 68)"
+    const RED_STYLE = {
+      color: RED,
+      colorHighlighted: RED,
+      colorSelected: RED,
+      textBoxColor: RED,
+      textBoxColorHighlighted: RED,
+      textBoxColorSelected: RED,
+    }
+    let hoveredUID: string | null = null
+
+    const clearHover = () => {
+      if (hoveredUID) {
+        try {
+          styleCfg.setAnnotationStyles(hoveredUID, {})
+        } catch {}
+        hoveredUID = null
+        engineRef.current?.getViewport(VIEWPORT_ID)?.render()
+      }
+    }
+
+    const onMove = (e: MouseEvent) => {
+      const canvas = element.querySelector("canvas") ?? element
+      const rect = canvas.getBoundingClientRect()
+      const point: [number, number] = [
+        e.clientX - rect.left,
+        e.clientY - rect.top,
+      ]
+      const ann = toolUtilities.getAnnotationNearPoint(element, point, 10) as
+        | { annotationUID?: string }
+        | null
+      const uid = ann?.annotationUID ?? null
+      if (uid === hoveredUID) return
+      if (hoveredUID) {
+        try {
+          styleCfg.setAnnotationStyles(hoveredUID, {})
+        } catch {}
+      }
+      hoveredUID = uid
+      if (uid) {
+        styleCfg.setAnnotationStyles(uid, RED_STYLE)
+      }
+      engineRef.current?.getViewport(VIEWPORT_ID)?.render()
+    }
+
+    element.addEventListener("mousemove", onMove)
+    element.addEventListener("mouseleave", clearHover)
+
+    return () => {
+      element.removeEventListener("mousemove", onMove)
+      element.removeEventListener("mouseleave", clearHover)
+      clearHover()
+    }
+  }, [ready, activeTool, calibrateMode])
+
+  // Escape cancels an in-progress drawing (e.g. half-drawn calibration line).
+  React.useEffect(() => {
+    if (!ready) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        const element = containerRef.current
+        if (!element) return
+        isCancellingRef.current = true
+        let cancelledUID: string | undefined
+        try {
+          cancelledUID = cancelActiveManipulations(element) ?? undefined
+        } finally {
+          isCancellingRef.current = false
+        }
+        if (cancelledUID) {
+          try {
+            csAnnotation.state.removeAnnotation(cancelledUID)
+          } catch {}
+          engineRef.current?.getViewport(VIEWPORT_ID)?.render()
+        }
+        return
+      }
+      const isMetaOrCtrl = e.metaKey || e.ctrlKey
+      if (!isMetaOrCtrl) return
+      const key = e.key.toLowerCase()
+      if (key === "z" && !e.shiftKey) {
+        e.preventDefault()
+        historyMemo.undo()
+        engineRef.current?.getViewport(VIEWPORT_ID)?.render()
+      } else if ((key === "z" && e.shiftKey) || key === "y") {
+        e.preventDefault()
+        historyMemo.redo()
+        engineRef.current?.getViewport(VIEWPORT_ID)?.render()
+      }
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready])
+
+  // Persist annotations on modify / add / remove.
+  React.useEffect(() => {
+    if (!ready) return
     const persist = () => {
       const currentId = imageIdRef.current
       if (!currentId) return
@@ -233,13 +363,19 @@ export function Viewer() {
         saveAnnotations(hashId, snapshot)
       }
     }
-    element.addEventListener(ToolEnums.Events.ANNOTATION_ADDED, persist)
-    element.addEventListener(ToolEnums.Events.ANNOTATION_MODIFIED, persist)
-    element.addEventListener(ToolEnums.Events.ANNOTATION_REMOVED, persist)
+    eventTarget.addEventListener(ToolEnums.Events.ANNOTATION_ADDED, persist)
+    eventTarget.addEventListener(ToolEnums.Events.ANNOTATION_MODIFIED, persist)
+    eventTarget.addEventListener(ToolEnums.Events.ANNOTATION_REMOVED, persist)
     return () => {
-      element.removeEventListener(ToolEnums.Events.ANNOTATION_ADDED, persist)
-      element.removeEventListener(ToolEnums.Events.ANNOTATION_MODIFIED, persist)
-      element.removeEventListener(ToolEnums.Events.ANNOTATION_REMOVED, persist)
+      eventTarget.removeEventListener(ToolEnums.Events.ANNOTATION_ADDED, persist)
+      eventTarget.removeEventListener(
+        ToolEnums.Events.ANNOTATION_MODIFIED,
+        persist,
+      )
+      eventTarget.removeEventListener(
+        ToolEnums.Events.ANNOTATION_REMOVED,
+        persist,
+      )
     }
   }, [ready])
 
@@ -250,6 +386,9 @@ export function Viewer() {
     toolGroup.setToolPassive(TOOL_NAMES.WindowLevel)
     toolGroup.setToolPassive(TOOL_NAMES.Pan)
     toolGroup.setToolPassive(TOOL_NAMES.Length)
+    toolGroup.setToolPassive(TOOL_NAMES.Angle)
+    toolGroup.setToolPassive(TOOL_NAMES.Ellipse)
+    toolGroup.setToolPassive(TOOL_NAMES.Eraser)
     if (tool === "windowLevel") {
       toolGroup.setToolActive(TOOL_NAMES.WindowLevel, {
         bindings: [{ mouseButton: primary }],
@@ -260,6 +399,18 @@ export function Viewer() {
       })
     } else if (tool === "length") {
       toolGroup.setToolActive(TOOL_NAMES.Length, {
+        bindings: [{ mouseButton: primary }],
+      })
+    } else if (tool === "angle") {
+      toolGroup.setToolActive(TOOL_NAMES.Angle, {
+        bindings: [{ mouseButton: primary }],
+      })
+    } else if (tool === "ellipse") {
+      toolGroup.setToolActive(TOOL_NAMES.Ellipse, {
+        bindings: [{ mouseButton: primary }],
+      })
+    } else if (tool === "eraser") {
+      toolGroup.setToolActive(TOOL_NAMES.Eraser, {
         bindings: [{ mouseButton: primary }],
       })
     }
@@ -349,11 +500,12 @@ export function Viewer() {
 
   const applyCalibration = (imageId: string, mmPerPixel: number | null) => {
     if (mmPerPixel && mmPerPixel > 0) {
+      // Do NOT set `scale` — it overrides only the X scale in Cornerstone's
+      // length units logic, leaving Y inconsistent. Pixel spacings are enough.
       coreUtilities.calibratedPixelSpacingMetadataProvider.add(imageId, {
         type: Enums.CalibrationTypes.USER,
         rowPixelSpacing: mmPerPixel,
         columnPixelSpacing: mmPerPixel,
-        scale: 1,
       })
     } else {
       coreUtilities.calibratedPixelSpacingMetadataProvider.add(imageId, {
@@ -449,14 +601,12 @@ export function Viewer() {
         type: Enums.CalibrationTypes.USER,
         rowPixelSpacing: mmPerPixel,
         columnPixelSpacing: mmPerPixel,
-        scale: 1,
       })
     }
     const hashId = imageIdRef.current.replace(/^web:/, "")
     const stored: StoredCalibration = { mmPerPixel, createdAt: Date.now() }
     saveCalibration(hashId, stored)
     setCalibration(stored)
-    // Remove the calibration annotation once done.
     try {
       csAnnotation.state.removeAnnotation(pending.annotationUID)
     } catch {}
@@ -489,12 +639,62 @@ export function Viewer() {
     }
   }
 
+  const historyMemo = (
+    coreUtilities as unknown as {
+      HistoryMemo: { DefaultHistoryMemo: { undo: () => void; redo: () => void } }
+    }
+  ).HistoryMemo.DefaultHistoryMemo
+
+  const handleUndo = () => {
+    historyMemo.undo()
+    getViewport()?.render()
+  }
+
+  const handleRedo = () => {
+    historyMemo.redo()
+    getViewport()?.render()
+  }
+
+  const handleClearAllAnnotations = () => {
+    const all = csAnnotation.state.getAllAnnotations() as Array<{
+      annotationUID?: string
+    }>
+    for (const ann of all) {
+      if (ann.annotationUID) {
+        try {
+          csAnnotation.state.removeAnnotation(ann.annotationUID)
+        } catch {}
+      }
+    }
+    getViewport()?.render()
+  }
+
+  const handleToggleAnnotations = () => {
+    const next = !annotationsHidden
+    setAnnotationsHidden(next)
+    const all = csAnnotation.state.getAllAnnotations() as Array<{
+      annotationUID?: string
+    }>
+    for (const ann of all) {
+      if (ann.annotationUID) {
+        csAnnotation.visibility.setAnnotationVisibility(
+          ann.annotationUID,
+          !next,
+        )
+      }
+    }
+    getViewport()?.render()
+  }
+
   const handleExport = () => {
     const viewport = getViewport()
-    if (!viewport) return
+    const element = containerRef.current
+    if (!viewport || !element) return
     const canvas = viewport.getCanvas()
     const name = imageMeta?.name ?? "viewport"
-    downloadCanvasAsPng(canvas, suggestFilename(name))
+    // SVG overlay is only present when annotations are visible; when hidden
+    // (annotationsHidden === true) exporting just the canvas is the desired result.
+    void exportViewportWithAnnotations(element, canvas, suggestFilename(name))
   }
 
   const handleOpenRecent = async (meta: StoredImageMeta) => {
@@ -533,6 +733,11 @@ export function Viewer() {
         onCalibrate={handleStartCalibration}
         onClearCalibration={handleClearCalibration}
         onExport={handleExport}
+        onToggleAnnotations={handleToggleAnnotations}
+        annotationsHidden={annotationsHidden}
+        onClearAnnotations={handleClearAllAnnotations}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
         calibration={calibration}
         calibrateMode={calibrateMode}
       />
@@ -545,7 +750,7 @@ export function Viewer() {
           onContextMenu={(e) => e.preventDefault()}
         />
         {!imageMeta && (
-          <div className="absolute inset-0 rounded-md bg-background/95 p-4 overflow-auto">
+          <div className="absolute inset-0 rounded-md bg-background p-4 overflow-auto">
             <UploadDropzone
               onFile={handleFile}
               loading={loading}

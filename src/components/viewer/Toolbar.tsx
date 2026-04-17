@@ -2,15 +2,23 @@
 
 import * as React from "react"
 import {
+  CircleIcon,
   ContrastIcon,
   DownloadIcon,
+  EraserIcon,
+  EyeIcon,
+  EyeOffIcon,
   FlipHorizontal2Icon,
   FlipVertical2Icon,
   MoveIcon,
+  Redo2Icon,
   RotateCcwIcon,
   RotateCwIcon,
   RulerIcon,
   SlidersHorizontalIcon,
+  Trash2Icon,
+  TriangleIcon,
+  Undo2Icon,
   XIcon,
 } from "lucide-react"
 
@@ -18,7 +26,13 @@ import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import type { StoredCalibration } from "@/lib/viewer/persistence"
 
-export type ActiveTool = "windowLevel" | "pan" | "length"
+export type ActiveTool =
+  | "windowLevel"
+  | "pan"
+  | "length"
+  | "angle"
+  | "ellipse"
+  | "eraser"
 
 type ToolbarProps = {
   disabled: boolean
@@ -32,6 +46,11 @@ type ToolbarProps = {
   onCalibrate: () => void
   onClearCalibration: () => void
   onExport: () => void
+  onToggleAnnotations: () => void
+  annotationsHidden: boolean
+  onClearAnnotations: () => void
+  onUndo: () => void
+  onRedo: () => void
   calibration: StoredCalibration | null
   calibrateMode: boolean
 }
@@ -48,6 +67,11 @@ export function Toolbar({
   onCalibrate,
   onClearCalibration,
   onExport,
+  onToggleAnnotations,
+  annotationsHidden,
+  onClearAnnotations,
+  onUndo,
+  onRedo,
   calibration,
   calibrateMode,
 }: ToolbarProps) {
@@ -76,6 +100,51 @@ export function Toolbar({
         onClick={() => onSelectTool("length")}
       >
         <RulerIcon />
+      </ToolButton>
+      <ToolButton
+        label="Medir ángulo"
+        active={activeTool === "angle" && !calibrateMode}
+        disabled={disabled}
+        onClick={() => onSelectTool("angle")}
+      >
+        <TriangleIcon />
+      </ToolButton>
+      <ToolButton
+        label="Medir elipse"
+        active={activeTool === "ellipse" && !calibrateMode}
+        disabled={disabled}
+        onClick={() => onSelectTool("ellipse")}
+      >
+        <CircleIcon />
+      </ToolButton>
+      <ToolButton
+        label="Borrar (clic en medición)"
+        active={activeTool === "eraser" && !calibrateMode}
+        disabled={disabled}
+        onClick={() => onSelectTool("eraser")}
+      >
+        <EraserIcon />
+      </ToolButton>
+      <ToolButton
+        label="Borrar todas las mediciones"
+        disabled={disabled}
+        onClick={onClearAnnotations}
+      >
+        <Trash2Icon />
+      </ToolButton>
+      <ToolButton
+        label="Deshacer (Ctrl+Z)"
+        disabled={disabled}
+        onClick={onUndo}
+      >
+        <Undo2Icon />
+      </ToolButton>
+      <ToolButton
+        label="Rehacer (Ctrl+Shift+Z)"
+        disabled={disabled}
+        onClick={onRedo}
+      >
+        <Redo2Icon />
       </ToolButton>
 
       <Separator orientation="vertical" className="h-6 mx-1" />
@@ -106,6 +175,14 @@ export function Toolbar({
       </ToolButton>
       <ToolButton label="Reset" disabled={disabled} onClick={onReset}>
         <RotateCcwIcon />
+      </ToolButton>
+      <ToolButton
+        label={annotationsHidden ? "Mostrar mediciones" : "Ocultar mediciones"}
+        active={annotationsHidden}
+        disabled={disabled}
+        onClick={onToggleAnnotations}
+      >
+        {annotationsHidden ? <EyeOffIcon /> : <EyeIcon />}
       </ToolButton>
 
       <Separator orientation="vertical" className="h-6 mx-1" />

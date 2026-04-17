@@ -5,6 +5,9 @@ import {
 import {
   init as toolsInit,
   addTool,
+  AngleTool,
+  EllipticalROITool,
+  EraserTool,
   PanTool,
   ZoomTool,
   WindowLevelTool,
@@ -29,6 +32,9 @@ export function initCornerstone(): Promise<void> {
     addTool(ZoomTool)
     addTool(WindowLevelTool)
     addTool(LengthTool)
+    addTool(AngleTool)
+    addTool(EllipticalROITool)
+    addTool(EraserTool)
     addTool(StackScrollTool)
   })()
 
@@ -40,5 +46,8 @@ export const TOOL_NAMES = {
   Zoom: ZoomTool.toolName,
   WindowLevel: WindowLevelTool.toolName,
   Length: LengthTool.toolName,
+  Angle: AngleTool.toolName,
+  Ellipse: EllipticalROITool.toolName,
+  Eraser: EraserTool.toolName,
   StackScroll: StackScrollTool.toolName,
 } as const
