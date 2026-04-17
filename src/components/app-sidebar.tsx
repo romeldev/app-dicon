@@ -1,5 +1,6 @@
 "use client"
 
+import Image from "next/image"
 import * as React from "react"
 
 import { NavMain } from "@/components/nav-main"
@@ -13,7 +14,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar"
-import { FolderIcon, SquareTerminalIcon, CommandIcon } from "lucide-react"
+import { FolderIcon, HouseIcon, SquareTerminalIcon } from "lucide-react"
 
 const data = {
   user: {
@@ -22,6 +23,11 @@ const data = {
     avatar: "/avatars/shadcn.jpg",
   },
   navMain: [
+    {
+      title: "Home",
+      url: "/",
+      icon: <HouseIcon />,
+    },
     {
       title: "Playground",
       url: "/playground/",
@@ -44,8 +50,14 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               className="data-[slot=sidebar-menu-button]:p-1.5!"
               render={<a href="#" />}
             >
-              <CommandIcon className="size-5!" />
-              <span className="text-base font-semibold">Acme Inc.</span>
+              <Image
+                src="/logo.png"
+                alt="Radia"
+                width={20}
+                height={20}
+                className="size-5! shrink-0"
+              />
+              <span className="text-base font-semibold">Radia</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
